@@ -11,14 +11,20 @@ import pandas as pd
 # -----------------------------
 # Add or remove your CSV files here
 CSV_PATHS = [
+    "New_model_restaurant - Sheet1.csv",
     "hospitality_inference_results.csv",
     "Airline_inference_results.csv"
 ]
+'''
+CSV_PATHS = [
+    "hospitality_inference_results.csv",
+    "Airline_inference_results.csv"
+]'''
 OUT_DIR = Path("eval_output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3:27b-it-qat"
+OLLAMA_MODEL = "tensortemplar/prometheus2:7b-fp16"
 
 # -----------------------------
 # Deterministic parsing utilities
@@ -183,26 +189,70 @@ Scoring rules:
 - afq_score_0_to_100 = format_score_0_to_30 + content_score_0_to_70
 """
 
-def evaluate_row_ollama(theme: str, issue: str, model_output: str) -> dict:
+def emergency_json_parse(text: str) -> dict:
+    """Failsafe: Forcefully extracts scores from broken JSON text using regex."""
+    rubric = {}
+    # Hunt down the specific numbers assigned to each dimension
+    for key in ["relevance", "actionability", "concreteness", "feasibility"]:
+        match = re.search(fr'"{key}"\s*:\s*"?(\d)"?', text, re.IGNORECASE)
+        rubric[key] = int(match.group(1)) if match else 1  # Fallback to 1 if completely missing
+
+    # Try to extract the rationale text, stopping at the end of the JSON
+    rat_match = re.search(r'"short_rationale"\s*:\s*"(.*?)"\s*\}?\s*$', text, re.IGNORECASE | re.DOTALL)
+    rationale = rat_match.group(1) if rat_match else "[Recovered via Regex due to broken JSON]"
+
+    return {
+        "rubric_scores_1_to_5": rubric,
+        "short_rationale": rationale
+    }
+
+def evaluate_row_ollama(theme: str, issue: str, model_output: str, max_retries: int = 2) -> dict:
     prompt = SINGLE_JUDGE_TEMPLATE.format(theme=theme, issue=issue, model_output=model_output)
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {
+            "num_ctx": 4096  # Keeps VRAM usage low
+        }
     }
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
-        resp.raise_for_status()
-        data = resp.json().get("response", "")
-        match = re.search(r'\{.*\}', data, re.DOTALL)
-        if match:
-            data = match.group(0)
-        return json.loads(data)
-    except Exception as e:
-        print(f"Ollama call failed: {e}")
-        return None
+    
+    last_error = None
+    last_data = ""
+    
+    # Layer 1: Auto-Retry Loop
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(OLLAMA_URL, json=payload, timeout=300)
+            
+            if resp.status_code != 200:
+                print(f"      [Server Error] {resp.status_code}: {resp.text}")
+                continue
+                
+            last_data = resp.json().get("response", "")
+            match = re.search(r'\{.*\}', last_data, re.DOTALL)
+            
+            if match:
+                json_str = match.group(0)
+                try:
+                    # Try standard strict parsing
+                    return json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    last_error = e
+                    print(f"      [Attempt {attempt+1}] Broken JSON detected. Retrying...")
+                    
+        except Exception as e:
+            print(f"      [Attempt {attempt+1}] Connection failed: {e}")
+            last_error = e
 
+    # Layer 2: Regex Recovery (If we exhausted our retries and still have broken text)
+    if last_data:
+        print(f"      [Failsafe Triggered] Force-extracting data via regex...")
+        return emergency_json_parse(last_data)
+        
+    print(f"      [Total Failure] Could not evaluate row. Last Error: {last_error}")
+    return None
 # -----------------------------
 # Main Execution
 # -----------------------------

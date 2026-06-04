@@ -4,6 +4,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
 
 # -----------------------------
 # Configuration & Theme
@@ -12,168 +14,162 @@ sns.set_theme(style="whitegrid", context="talk")
 plt.rcParams["figure.dpi"] = 120
 plt.rcParams["savefig.dpi"] = 300
 
-EVAL_DIR = Path("eval_output")
-PLOTS_DIR = Path("plot_output")
+MODEL_DIRECTORIES = {
+    "eval_output_gemma": "Gemma",
+    "eval_output_prometheus": "Prometheus"
+}
 
-# Create subdirectories for organized outputs
-INDIV_DIR = PLOTS_DIR / "individual"
-COMP_DIR = PLOTS_DIR / "comparative"
-INDIV_DIR.mkdir(parents=True, exist_ok=True)
-COMP_DIR.mkdir(parents=True, exist_ok=True)
+PASS_THRESHOLD = 80
 
-def run_plots():
-    if not EVAL_DIR.exists():
-        raise FileNotFoundError(f"Missing directory {EVAL_DIR}. Run evaluation.py first.")
-        
-    csv_files = list(EVAL_DIR.glob("evaluated_*.csv"))
-    if not csv_files:
-        print("No evaluated CSV files found to plot.")
-        return
+PLOTS_DIR = Path("plot_output/comprehensive_comparison")
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load and combine all datasets
+def get_clean_dataset_name(filename: str) -> str:
+    lower = filename.lower()
+    if "restaurant" in lower: return "Restaurant"
+    if "airline" in lower: return "Airline"
+    if "hospitality" in lower: return "Hospitality"
+    return "Unknown"
+
+def run_comprehensive_plots():
+    print("🔍 Scanning folders for evaluated CSVs...")
     dfs = []
-    for file in csv_files:
-        temp_df = pd.read_csv(file)
-        # Extract base name to label the datasets cleanly
-        dataset_name = file.stem.replace("evaluated_", "").replace("_inference_results", "").replace("New_model_", "").capitalize()
-        dataset_name = dataset_name.replace(" - sheet1", "") # Cleanup restaurant name
-        temp_df["Dataset"] = dataset_name
-        dfs.append(temp_df)
-        
-    df = pd.concat(dfs, ignore_index=True)
     
-    # Drop rows where LLM failed
-    df_valid = df.dropna(subset=["afq_score_0_to_100"]).copy()
-    if df_valid.empty:
-        print("No valid evaluation scores found to plot.")
+    for folder, model_label in MODEL_DIRECTORIES.items():
+        dir_path = Path(folder)
+        if not dir_path.exists(): continue
+        for file in dir_path.glob("evaluated_*.csv"):
+            temp_df = pd.read_csv(file)
+            temp_df["Dataset"] = get_clean_dataset_name(file.name)
+            temp_df["Model"] = model_label
+            dfs.append(temp_df)
+
+    if not dfs:
+        print("❌ No data loaded. Check folders.")
         return
-        
+
+    df_valid = pd.concat(dfs, ignore_index=True).dropna(subset=["afq_score_0_to_100"]).copy()
     dimensions = ["relevance", "actionability", "concreteness", "feasibility"]
+    for dim in dimensions:
+        df_valid[dim] = pd.to_numeric(df_valid[dim], errors="coerce")
+
+    print(f"✅ Loaded {len(df_valid)} valid rows. Generating 7 comprehensive plots...")
+    model_palette = sns.color_palette("Set1", n_colors=df_valid["Model"].nunique())
 
     # ==========================================
-    # 1. INDIVIDUAL PLOTS (Per Dataset)
+    # Plot 1: Mean AFQ by Model
     # ==========================================
-    print("Generating Individual Dataset Plots...")
-    for dataset_name, df_sub in df_valid.groupby("Dataset"):
-        # Make a specific folder for this dataset
-        ds_dir = INDIV_DIR / dataset_name
-        ds_dir.mkdir(exist_ok=True)
-        
-        # A. AFQ Histogram + KDE
-        plt.figure(figsize=(8, 6))
-        sns.histplot(df_sub["afq_score_0_to_100"], bins=10, kde=True, color="steelblue")
-        plt.title(f"{dataset_name}: Overall AFQ Score Distribution")
-        plt.xlabel("AFQ Score (0-100)")
-        plt.ylabel("Count")
-        plt.xlim(0, 100)
-        plt.tight_layout()
-        plt.savefig(ds_dir / f"{dataset_name}_01_afq_distribution.png")
-        plt.close()
-        
-        # B. Format vs Content Scatter
-        plt.figure(figsize=(8, 6))
-        sns.scatterplot(
-            data=df_sub, x="format_score_0_to_30", y="content_score_0_to_70",
-            color="indigo", alpha=0.7, s=120
-        )
-        plt.title(f"{dataset_name}: Format vs Content Score")
-        plt.xlabel("Format Score (0-30)")
-        plt.ylabel("Content Score (0-70)")
-        plt.axvline(30, color='gray', linestyle='--', alpha=0.5, label='Max Format (30)')
-        plt.axhline(70, color='gray', linestyle='--', alpha=0.5, label='Max Content (70)')
-        plt.xlim(-2, 32)
-        plt.ylim(-5, 75)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(ds_dir / f"{dataset_name}_02_format_vs_content.png")
-        plt.close()
-
-        # C. Dimension Boxplots
-        melted_sub = df_sub.melt(value_vars=dimensions, var_name="Dimension", value_name="Score (1-5)")
-        plt.figure(figsize=(10, 6))
-        sns.boxplot(data=melted_sub, x="Dimension", y="Score (1-5)", color="lightseagreen", showfliers=False)
-        sns.stripplot(data=melted_sub, x="Dimension", y="Score (1-5)", color=".25", alpha=0.6, jitter=True)
-        plt.title(f"{dataset_name}: Scores by Qualitative Dimension")
-        plt.ylim(0.5, 5.5)
-        plt.tight_layout()
-        plt.savefig(ds_dir / f"{dataset_name}_03_dimensions.png")
-        plt.close()
-
-        # D. Quality Tiers Pie Chart
-        bins = [-1, 59.9, 79.9, 100]
-        labels = ['Needs Improvement (<60)', 'Acceptable (60-79)', 'Excellent (80-100)']
-        tiers = pd.cut(df_sub['afq_score_0_to_100'], bins=bins, labels=labels)
-        tier_counts = tiers.value_counts().sort_index()
-        
-        plt.figure(figsize=(8, 8))
-        colors = ['#ff9999','#ffcc99','#99ff99']
-        plt.pie(tier_counts, labels=tier_counts.index, autopct='%1.1f%%', startangle=140, colors=colors)
-        plt.title(f"{dataset_name}: Overall Quality Breakdown")
-        plt.tight_layout()
-        plt.savefig(ds_dir / f"{dataset_name}_04_quality_tiers.png")
-        plt.close()
-
-    # ==========================================
-    # 2. COMPARATIVE PLOTS (Across Datasets)
-    # ==========================================
-    print("Generating Comparative Overlays...")
-    
-    # A. AFQ KDE Comparison (Smooth Density)
     plt.figure(figsize=(10, 6))
-    sns.kdeplot(data=df_valid, x="afq_score_0_to_100", hue="Dataset", fill=True, common_norm=False, alpha=0.4, linewidth=2)
-    plt.title("Comparative: Overall AFQ Score Density")
-    plt.xlabel("AFQ Score (0-100)")
-    plt.ylabel("Density")
-    plt.xlim(0, 100)
-    plt.tight_layout()
-    plt.savefig(COMP_DIR / "01_comparative_afq_density.png")
-    plt.close()
-
-    # B. Format vs Content Scatter Comparison
-    plt.figure(figsize=(10, 6))
-    sns.scatterplot(
-        data=df_valid, x="format_score_0_to_30", y="content_score_0_to_70",
-        hue="Dataset", style="Dataset", alpha=0.7, s=100
-    )
-    plt.title("Comparative: Format vs Content Scores")
-    plt.xlabel("Format Score (0-30)")
-    plt.ylabel("Content Score (0-70)")
-    plt.xlim(-2, 32)
-    plt.ylim(-5, 75)
+    sns.barplot(data=df_valid, x="Dataset", y="afq_score_0_to_100", hue="Model", palette=model_palette, edgecolor="black")
+    plt.title("1. Mean Overall AFQ Score by Model")
+    plt.ylim(0, 100)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(COMP_DIR / "02_comparative_format_vs_content.png")
+    plt.savefig(PLOTS_DIR / "01_model_mean_afq.png")
     plt.close()
 
-    # C. Grouped Boxplots for Dimensions
-    melted_all = df_valid.melt(id_vars=["Dataset"], value_vars=dimensions, var_name="Dimension", value_name="Score (1-5)")
+    # ==========================================
+    # Plot 2: Industry vs Model Heatmap
+    # ==========================================
+    pivot_afq = df_valid.pivot_table(index="Dataset", columns="Model", values="afq_score_0_to_100", aggfunc="mean")
+    plt.figure(figsize=(8, 5))
+    sns.heatmap(pivot_afq, annot=True, fmt=".1f", cmap="Blues", cbar_kws={'label': 'Mean AFQ Score'}, linewidths=.5)
+    plt.title("2. Heatmap: Mean AFQ by Industry & Model")
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "02_industry_model_heatmap.png")
+    plt.close()
+
+    # ==========================================
+    # Plot 3: AFQ Distribution (Violin + Boxplot)
+    # ==========================================
+    plt.figure(figsize=(10, 6))
+    sns.violinplot(data=df_valid, x="Dataset", y="afq_score_0_to_100", hue="Model", 
+                   split=True, inner=None, palette=model_palette, alpha=0.5)
+    sns.boxplot(data=df_valid, x="Dataset", y="afq_score_0_to_100", hue="Model",
+                width=0.3, showfliers=False, boxprops={'facecolor':'none', 'zorder':10})
+    plt.title("3. AFQ Score Distribution (Violin & Box)")
+    plt.ylim(0, 110)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig(PLOTS_DIR / "03_afq_distribution.png")
+    plt.close()
+
+    # ==========================================
+    # Plot 4: Dimension Boxplots (Overall Spread)
+    # ==========================================
+    melted = df_valid.melt(id_vars=["Model", "Dataset"], value_vars=dimensions, var_name="Dimension", value_name="Score")
     plt.figure(figsize=(12, 6))
-    sns.boxplot(data=melted_all, x="Dimension", y="Score (1-5)", hue="Dataset", palette="Set2")
-    plt.title("Comparative: Dimension Score Ranges")
+    sns.boxplot(data=melted, x="Dimension", y="Score", hue="Model", palette=model_palette)
+    plt.title("4. Overall Spread of Qualitative Dimensions")
     plt.ylim(0.5, 5.5)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(COMP_DIR / "03_comparative_dimensions_boxplot.png")
+    plt.savefig(PLOTS_DIR / "04_dimension_boxplots.png")
     plt.close()
 
-    # D. Mean Score Bar Chart (Easy to read averages)
-    mean_scores = df_valid.groupby("Dataset")[dimensions].mean().reset_index()
-    melted_means = mean_scores.melt(id_vars="Dataset", var_name="Dimension", value_name="Mean Score")
+    # ==========================================
+    # Plot 5: Format vs Content Regression
+    # ==========================================
+    g = sns.lmplot(data=df_valid, x="format_score_0_to_30", y="content_score_0_to_70", 
+                   hue="Model", col="Dataset", palette=model_palette, height=5, aspect=1, scatter_kws={"alpha":0.6})
+    g.fig.suptitle("5. Format vs Content Trendline", y=1.05)
+    for ax in g.axes.flat:
+        ax.set_xlim(-2, 32); ax.set_ylim(-5, 75)
+        ax.axvline(30, color='gray', linestyle='--', alpha=0.3)
+        ax.axhline(70, color='gray', linestyle='--', alpha=0.3)
+    plt.savefig(PLOTS_DIR / "05_format_vs_content.png")
+    plt.close()
+
+    # ==========================================
+    # Plot 6: NEW - Dimension Scores Broken Down by Dataset
+    # ==========================================
+    # Calculate the exact mean for each dimension, separated by dataset and model
+    dim_means = melted.groupby(["Dataset", "Model", "Dimension"])["Score"].mean().reset_index()
+
+    g = sns.catplot(
+        data=dim_means, x="Dimension", y="Score", hue="Model", col="Dataset",
+        kind="bar", palette=model_palette, edgecolor="black", height=5, aspect=1.2
+    )
+    g.fig.suptitle("6. Average Dimension Scores by Dataset & Model", y=1.05)
+    g.set_axis_labels("", "Mean Score (1-5)")
+    g.set(ylim=(0, 5.8)) # Extra room for the text labels
     
-    plt.figure(figsize=(12, 6))
-    sns.barplot(data=melted_means, x="Dimension", y="Mean Score", hue="Dataset", palette="muted")
-    plt.title("Comparative: Average Dimension Scores")
-    plt.ylim(0, 5.0)
-    for p in plt.gca().patches: # Add data labels on top of bars
-        plt.gca().annotate(f"{p.get_height():.2f}", 
-                           (p.get_x() + p.get_width() / 2., p.get_height()),
-                           ha='center', va='center', xytext=(0, 5), textcoords='offset points', fontsize=10)
+    # Add values on top of the bars and rotate text for readability
+    for ax in g.axes.flat:
+        ax.tick_params(axis='x', rotation=45)
+        for p in ax.patches:
+            h = p.get_height()
+            if not np.isnan(h) and h > 0:
+                ax.annotate(f"{h:.2f}", (p.get_x() + p.get_width() / 2., h),
+                            ha='center', va='bottom', xytext=(0, 5), textcoords='offset points', fontsize=10)
+
+    # Use bbox_inches to ensure rotated text isn't cut off when saving
+    plt.savefig(PLOTS_DIR / "06_dimension_scores_by_dataset.png", bbox_inches='tight')
+    plt.close()
+
+    # ==========================================
+    # Plot 7: Pass Rates
+    # ==========================================
+    df_valid["Passed"] = (df_valid["afq_score_0_to_100"] >= PASS_THRESHOLD).astype(int)
+    pass_rates = df_valid.groupby(["Dataset", "Model"])["Passed"].mean().reset_index()
+    pass_rates["Pass_Pct"] = pass_rates["Passed"] * 100
+
+    plt.figure(figsize=(10, 6))
+    ax = sns.barplot(data=pass_rates, x="Dataset", y="Pass_Pct", hue="Model", palette=model_palette, edgecolor="black")
+    plt.title(f"7. Pass Rates (AFQ ≥ {PASS_THRESHOLD})")
+    plt.ylim(0, 110)
+    plt.ylabel("Pass Rate (%)")
+    for p in ax.patches:
+        h = p.get_height()
+        if not np.isnan(h) and h > 0:
+            ax.annotate(f"{h:.0f}%", (p.get_x() + p.get_width() / 2., h), 
+                        ha='center', va='bottom', xytext=(0, 5), textcoords='offset points', fontweight='bold')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(COMP_DIR / "04_comparative_mean_scores_bar.png")
+    plt.savefig(PLOTS_DIR / "07_pass_rates.png")
     plt.close()
 
-    print(f"Plots successfully generated! Check the '{PLOTS_DIR}/individual' and '{PLOTS_DIR}/comparative' folders.")
+    print(f"✅ All 7 targeted comparison plots successfully generated in '{PLOTS_DIR}'!")
 
 if __name__ == "__main__":
-    run_plots()
+    run_comprehensive_plots()
