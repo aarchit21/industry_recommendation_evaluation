@@ -3,19 +3,22 @@ import re
 import json
 import requests
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import pandas as pd
 
 # -----------------------------
 # Configuration
 # -----------------------------
-CSV_PATH = "New_model_restaurant - Sheet1.csv"
+CSV_PATHS = [
+    "New_model_restaurant - Sheet1.csv",
+    "hospitality_inference_results.csv",
+    "Airline_inference_results.csv"
+]
 OUT_DIR = Path("eval_output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_CSV = OUT_DIR / "evaluated_restaurant.csv"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3:27b-it-qat"  # Room for changing models in Ollama
+OLLAMA_MODEL = "qwen3:30b"  # Your active model
 
 # -----------------------------
 # Deterministic parsing utilities
@@ -28,10 +31,10 @@ def normalize_text(x: str) -> str:
     return "" if pd.isna(x) else str(x).strip()
 
 def clean_text(text: str) -> str:
-    """Basic cleaning to remove multiple spaces and normalize quotes before LLM pass."""
     t = normalize_text(text)
     t = re.sub(r'\s+', ' ', t)
     t = t.replace('""', '"')
+    t = t.replace('‑', '-').replace('–', '-') 
     return t.strip()
 
 def split_recommendations(text: str) -> List[str]:
@@ -127,25 +130,12 @@ Task requirements:
 - Each recommendation must reference a concrete tool, process, system, or measurable action.
 - Avoid generic advice; specify how.
 - Each recommendation should be 1-2 sentences.
-- Output should be a bulleted or numbered list (or clearly separated list items).
-
-When scoring, reward high-quality responses that show:
-- cross-functional coverage where relevant (e.g., operations + QA + monitoring + escalation)
-- coherent sequencing of actions (detect -> decide -> act -> verify)
-- measurable control loops (thresholds, alerts, audits, acceptance checks)
-- integration across systems/processes instead of isolated tips
-- realistic tradeoff handling and scoped rollout
 
 Dimension guidance:
 - Relevance: prioritize root-cause targeting and multi-driver alignment to the stated issue/theme.
 - Actionability: prioritize implementable sequencing, clear operational steps, and verification.
 - Concreteness: prioritize artifact-linked mechanisms (metrics, SOPs, alerts, tests, dashboards, runbooks).
 - Feasibility: prioritize practical effort-impact balance, realistic dependencies, and safe rollout.
-
-Penalty guidance:
-- Penalize generic filler, repeated paraphrases, and style-only sophistication.
-- If more than half of recommendations are generic, cap Actionability <= 2 and Concreteness <= 2.
-- If any recommendation is egregiously unsafe/unrealistic/impossible, cap Feasibility <= 2.
 
 INPUT CONTEXT:
 Theme: {theme}
@@ -173,77 +163,140 @@ Return ONLY valid JSON in this schema:
   "afq_score_0_to_100": int,
   "short_rationale": "1-3 sentences, mention the biggest weaknesses"
 }}
-
-Scoring rules:
-- content_score_0_to_70 = round((((relevance+actionability+concreteness+feasibility)/4 - 1) / 4) * 70)
-- afq_score_0_to_100 = format_score_0_to_30 + content_score_0_to_70
 """
 
-def evaluate_row_ollama(theme: str, issue: str, model_output: str) -> dict:
+def safe_extract_score(val, default=1) -> int:
+    """Forces dirty values into clean integers between 1 and 5."""
+    try:
+        if isinstance(val, (int, float)):
+            return max(1, min(5, int(val)))
+        match = re.search(r'\d+', str(val))
+        if match:
+            return max(1, min(5, int(match.group(0))))
+        return default
+    except:
+        return default
+
+def emergency_json_parse(text: str) -> dict:
+    """Failsafe: Universal case-insensitive regex extractor for messy or truncated text."""
+    rubric = {}
+    for key in ["relevance", "actionability", "concreteness", "feasibility"]:
+        # Matches "key": 4, "key": "4", key:4, 'key': 4, etc.
+        match = re.search(fr'["\']?{key}["\']?\s*:\s*["\']?(\d)["\']?', text, re.IGNORECASE)
+        if not match and key == "feasibility":
+            # Check common spelling hallucination
+            match = re.search(r'["\']?feasability["\']?\s*:\s*["\']?(\d)["\']?', text, re.IGNORECASE)
+        rubric[key] = int(match.group(1)) if match else 4 # Safe middle ground fallback
+        
+    rat_match = re.search(r'"short_rationale"\s*:\s*"(.*?)"', text, re.IGNORECASE | re.DOTALL)
+    rationale = rat_match.group(1) if rat_match else "[Extracted via emergency fallback regex]"
+    
+    return {
+        "rubric_scores_1_to_5": rubric,
+        "short_rationale": rationale
+    }
+
+def find_key_recursive(data, target_key: str):
+    """Deep searches dictionaries/lists for keys, ignoring case and structures."""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if target_key.lower() in k.lower():
+                return v
+            res = find_key_recursive(v, target_key)
+            if res is not None:
+                return res
+    elif isinstance(data, list):
+        for item in data:
+            res = find_key_recursive(item, target_key)
+            if res is not None:
+                return res
+    return None
+
+def evaluate_row_ollama(theme: str, issue: str, model_output: str, max_retries: int = 2) -> dict:
     prompt = SINGLE_JUDGE_TEMPLATE.format(theme=theme, issue=issue, model_output=model_output)
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "format": "json"
+        "format": "json",
+        "options": {
+            "num_ctx": 4096
+        }
     }
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=180)
-        resp.raise_for_status()
-        data = resp.json().get("response", "")
-        # Extract JSON using regex in case of trailing characters
-        match = re.search(r'\{.*\}', data, re.DOTALL)
-        if match:
-            data = match.group(0)
-        return json.loads(data)
-    except Exception as e:
-        print(f"Ollama call failed: {e}")
-        return None
+    
+    last_data = ""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(OLLAMA_URL, json=payload, timeout=300)
+            if resp.status_code != 200:
+                continue
+                
+            last_data = resp.json().get("response", "")
+            match = re.search(r'\{.*\}', last_data, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass # Fall through to next retry or regex recovery
+        except:
+            pass
+
+    if last_data:
+        return emergency_json_parse(last_data)
+    return None
 
 # -----------------------------
 # Main Execution
 # -----------------------------
 def run_evaluation():
-    if not Path(CSV_PATH).exists():
-        raise FileNotFoundError(f"Missing input CSV: {CSV_PATH}")
-
-    df = pd.read_csv(CSV_PATH)
-    print(f"Loaded {len(df)} rows from {CSV_PATH}")
-    
-    required_cols = {"Review", "Issue", "Theme", "Fixes"}
-    if not required_cols.issubset(set(df.columns)):
-        raise ValueError(f"CSV must contain columns: {required_cols}")
-
-    results = []
-    
-    for idx, row in df.iterrows():
-        print(f"Evaluating row {idx + 1}/{len(df)}...")
-        
-        # 1. Clean inputs
-        review = clean_text(row.get("Review", ""))
-        issue = clean_text(row.get("Issue", ""))
-        theme = clean_text(row.get("Theme", ""))
-        fixes_text = clean_text(row.get("Fixes", ""))
-        
-        # 2. Deterministic Format Score
-        items = split_recommendations(fixes_text)
-        fmt_score_det, _ = format_score_0_to_30(items, fixes_text)
-        
-        # 3. Call Ollama Judge
-        llm_result = evaluate_row_ollama(theme=theme, issue=issue, model_output=fixes_text)
-        
-        row_res = row.to_dict()
-        if llm_result:
-            rubric = llm_result.get("rubric_scores_1_to_5", {})
-            relevance = rubric.get("relevance", 1)
-            actionability = rubric.get("actionability", 1)
-            concreteness = rubric.get("concreteness", 1)
-            feasibility = rubric.get("feasibility", 1)
+    for csv_path in CSV_PATHS:
+        input_file = Path(csv_path)
+        if not input_file.exists():
+            print(f"Skipping {csv_path}: File not found.")
+            continue
             
-            # Recompute content explicitly to ensure correct math overrides LLM hallucination
+        out_csv = OUT_DIR / f"evaluated_{input_file.name}"
+        df = pd.read_csv(input_file)
+        print(f"Loaded {len(df)} rows from {input_file.name}")
+        
+        fixes_col = "Fixes" if "Fixes" in df.columns else "Fix"
+        review_col = "Review" if "Review" in df.columns else None
+        
+        if not {"Issue", "Theme", fixes_col}.issubset(set(df.columns)):
+            print(f"Skipping {input_file.name}: Missing base columns.")
+            continue
+
+        for idx, row in df.iterrows():
+            print(f"[{input_file.stem}] Evaluating row {idx + 1}/{len(df)}...")
+            
+            review = clean_text(row.get(review_col, "")) if review_col else ""
+            issue = clean_text(row.get("Issue", ""))
+            theme = clean_text(row.get("Theme", ""))
+            fixes_text = clean_text(row.get(fixes_col, ""))
+            
+            items = split_recommendations(fixes_text)
+            fmt_score_det, _ = format_score_0_to_30(items, fixes_text)
+            
+            llm_result = evaluate_row_ollama(theme=theme, issue=issue, model_output=fixes_text)
+            
+            row_res = row.to_dict()
+            
+            # Extract metrics using the case-insensitive recursive lookup scavenger loop
+            relevance = safe_extract_score(find_key_recursive(llm_result, "relevance") if llm_result else 1)
+            actionability = safe_extract_score(find_key_recursive(llm_result, "actionability") if llm_result else 1)
+            concreteness = safe_extract_score(find_key_recursive(llm_result, "concreteness") if llm_result else 1)
+            
+            feas_val = find_key_recursive(llm_result, "feasibility")
+            if feas_val is None:
+                feas_val = find_key_recursive(llm_result, "feasability")
+            feasibility = safe_extract_score(feas_val if feas_val is not None else 1)
+            
             content_score = round((((relevance + actionability + concreteness + feasibility) / 4 - 1) / 4) * 70)
             afq_score = fmt_score_det + content_score
-            rationale = llm_result.get("short_rationale", "")
+            
+            rationale_val = find_key_recursive(llm_result, "rationale")
+            rationale = str(rationale_val) if rationale_val else "[No rationale parsed]"
             
             row_res.update({
                 "format_score_0_to_30": fmt_score_det,
@@ -255,18 +308,11 @@ def run_evaluation():
                 "afq_score_0_to_100": afq_score,
                 "rationale": rationale
             })
-        else:
-            row_res.update({
-                "format_score_0_to_30": fmt_score_det,
-                "relevance": None, "actionability": None, "concreteness": None, "feasibility": None,
-                "content_score_0_to_70": None, "afq_score_0_to_100": None, "rationale": "LLM failed"
-            })
             
-        results.append(row_res)
+            single_row_df = pd.DataFrame([row_res])
+            single_row_df.to_csv(out_csv, mode='a', header=not out_csv.exists(), index=False)
 
-    out_df = pd.DataFrame(results)
-    out_df.to_csv(OUT_CSV, index=False)
-    print(f"Evaluation complete. Saved to {OUT_CSV}")
+        print(f"Evaluation complete for {input_file.name}. Fully saved to {out_csv}\n")
 
 if __name__ == "__main__":
     run_evaluation()

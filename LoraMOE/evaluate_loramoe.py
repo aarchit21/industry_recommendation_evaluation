@@ -14,7 +14,7 @@ OUT_DIR = Path("eval_output_loramoe")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3:27b-it-qat"
+OLLAMA_MODEL = "qwen3:30b-a3b-instruct-2507-q4_K_M"
 
 # -----------------------------
 # Deterministic parsing & cleaning utilities

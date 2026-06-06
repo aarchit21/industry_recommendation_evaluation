@@ -24,7 +24,7 @@ OUT_DIR = Path("eval_output")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "tensortemplar/prometheus2:7b-fp16"
+OLLAMA_MODEL = "qwen3:30b-a3b-instruct-2507-q4_K_M"
 
 # -----------------------------
 # Deterministic parsing utilities
