@@ -1,0 +1,7 @@
+Comparison,Mean_AFQ_Diff,95% CI,Interpretation
+XLORA minus LoRAMoE-3E,+0.6,"[-0.7, +1.9]",Statistically Indistinguishable
+XLORA minus LoRAMoE-4E,+0.8,"[-0.7, +2.2]",Statistically Indistinguishable
+XLORA minus LoRAMoE-1E-R64,+1.0,"[-0.4, +2.4]",Statistically Indistinguishable
+LoRAMoE-1E-R64 minus LoRAMoE-4E,-0.3,"[-0.9, +0.3]",Statistically Indistinguishable
+LoRAMoE-1E minus Base,+27.4,"[+24.7, +30.4]",Statistically Significant
+XLORA minus Base,+28.9,"[+26.0, +32.0]",Statistically Significant
