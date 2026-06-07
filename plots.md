@@ -10,8 +10,8 @@ All generated figures are saved as high-resolution PDFs in the `plot_output/pape
 * **Median Aggregation:** To prevent single-model hallucinations or biases from skewing the results, the final score for each row is the **median** of the three judges' scores. 
 * **Domains Evaluated:** Restaurant, Airline, and Hospitality.
 * **Systems Evaluated:**
-  * `LoRAMoE-0E` (The Base Model)
-  * `LoRAMoE-1E 4x rank` (A single high-capacity expert to test parameter scaling)
+  * `Base` (The zero-expert base model)
+  * `LoRAMoE-1E-R64` (A single high-capacity expert to test parameter scaling; equivalent to rank 64)
   * `LoRAMoE-[1-4]E` (Emergent routing with 1, 2, 3, or 4 experts)
   * `XLORA` (Predefined, auditable routing)
 
@@ -34,7 +34,7 @@ All generated figures are saved as high-resolution PDFs in the `plot_output/pape
 ### Figure 2: AFQ Delta Relative to Base
 **File:** `fig2_delta_vs_base.pdf`  
 **Type:** Diverging Bar Plot  
-**What it shows:** The exact point improvement (or regression) each system provides over the base model (`LoRAMoE-0E`). The baseline is normalized to zero.  
+**What it shows:** The exact point improvement (or regression) each system provides over the `Base` model. The baseline is normalized to zero.  
 **How to interpret:** This graph isolates the pure "gain" achieved by fine-tuning and routing. Any bar extending above the zero-line proves that the specific fine-tuning architecture successfully improved advice quality.
 
 ### Figure 3: Emergent Expert Count Sweep
@@ -46,8 +46,8 @@ All generated figures are saved as high-resolution PDFs in the `plot_output/pape
 ### Figure 4: Capacity vs. Routing
 **File:** `fig4_capacity_vs_routing.pdf`  
 **Type:** Paired Bar Plot  
-**What it shows:** A direct head-to-head comparison between `LoRAMoE-1E 4x rank` (a single, high-capacity adapter) and `LoRAMoE-4E` (four standard-capacity routed adapters).  
-**How to interpret:** This tests whether the gains of Mixture-of-Experts (MoE) come from *actual routing behavior* or simply from *having more trainable parameters*. If 4E beats the 4x rank model, routing is demonstrably effective.
+**What it shows:** A direct head-to-head comparison between `LoRAMoE-1E-R64` (a single, high-capacity adapter) and `LoRAMoE-4E` (four standard-capacity routed adapters).  
+**How to interpret:** This tests whether the gains of Mixture-of-Experts (MoE) come from *actual routing behavior* or simply from *having more trainable parameters*. If 4E beats the 1E-R64 model, routing is demonstrably effective.
 
 ### Figure 6: X-LoRA Gate Probability Separation
 **File:** `fig6_xlora_gate_separation.pdf`  

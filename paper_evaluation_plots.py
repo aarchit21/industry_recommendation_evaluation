@@ -45,15 +45,15 @@ def parse_metadata(filepath: Path):
         else: domain = "Unknown"
         return system, domain, judge
 
-    # Base Model (LoRAMoE-0E)
+    # Base Model (Base)
     m_base = re.search(r'base_model_(\d)\.csv', filename)
     if m_base: 
-        return "LoRAMoE-0E", domain_map.get(m_base.group(1), "Unknown"), judge
+        return "Base", domain_map.get(m_base.group(1), "Unknown"), judge
         
-    # Capacity Match (LoRAMoE-1E 4x rank)
+    # Capacity Match (LoRAMoE-1E-R64)
     m_r64 = re.search(r'final_output_1_64_(\d)\.csv', filename)
     if m_r64: 
-        return "LoRAMoE-1E 4x rank", domain_map.get(m_r64.group(1), "Unknown"), judge
+        return "LoRAMoE-1E-R64", domain_map.get(m_r64.group(1), "Unknown"), judge
         
     # Emergent LoRAMoE (e.g., final_output_3_2.csv -> 3 Experts, Airline)
     m_experts = re.search(r'final_output_(\d)_(\d)\.csv', filename)
@@ -124,22 +124,21 @@ def run_paper_plots(base_folder="Plots"):
         
     df_agg = df_valid.groupby(["System", "Domain", "Row_ID"]).agg(agg_dict).reset_index()
     
-    system_order = ["LoRAMoE-0E", "LoRAMoE-1E 4x rank", "LoRAMoE-1E", "LoRAMoE-2E", "LoRAMoE-3E", "LoRAMoE-4E", "XLORA"]
+    system_order = ["Base", "LoRAMoE-1E-R64", "LoRAMoE-1E", "LoRAMoE-2E", "LoRAMoE-3E", "LoRAMoE-4E", "XLORA"]
     available_systems = [s for s in system_order if s in df_agg["System"].unique()]
     
     # -----------------------------
     # Figure 1: Main AFQ by System and Domain
     # -----------------------------
     print("Generating Figure 1: Main AFQ by System and Domain...")
-    plt.figure(figsize=(12, 7)) # Taller figure to accommodate text
+    plt.figure(figsize=(12, 7))
     sns.barplot(data=df_agg, x="System", y="afq_score_0_to_100", hue="Domain", order=available_systems, capsize=.05, errwidth=1.5, edgecolor="black")
     plt.title("Fig 1: Main AFQ by System & Domain (Median Judge Score)", pad=15)
     plt.ylabel("AFQ Score (0-100)")
-    plt.xlabel("") # Remove redundant "System" label
+    plt.xlabel("")
     plt.ylim(0, 100)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    # FIX: Clean 45-degree rotation anchored to the right
     plt.xticks(rotation=45, ha='right', fontsize=12)
     plt.savefig(PLOTS_DIR / "fig1_afq_by_system_domain.pdf", bbox_inches='tight')
     plt.close()
@@ -162,30 +161,28 @@ def run_paper_plots(base_folder="Plots"):
     plt.xlabel("", fontsize=0)
     plt.ylabel("", fontsize=0)
     
-    # FIX: 45-degree rotation
     plt.xticks(rotation=45, ha='right', fontsize=12, fontweight='bold')
     plt.yticks(rotation=0, fontsize=13, fontweight='bold')
     plt.savefig(PLOTS_DIR / "fig1b_afq_heatmap_all.pdf", bbox_inches='tight')
     plt.close()
     
     # -----------------------------
-    # Figure 2: Delta vs Base (LoRAMoE-0E)
+    # Figure 2: Delta vs Base
     # -----------------------------
-    print("Generating Figure 2: Delta vs LoRAMoE-0E...")
-    base_means = df_agg[df_agg["System"] == "LoRAMoE-0E"].groupby("Domain")["afq_score_0_to_100"].mean()
+    print("Generating Figure 2: Delta vs Base...")
+    base_means = df_agg[df_agg["System"] == "Base"].groupby("Domain")["afq_score_0_to_100"].mean()
     def calc_delta(row): return row["afq_score_0_to_100"] - base_means[row["Domain"]] if row["Domain"] in base_means else np.nan
     df_agg["AFQ_Delta"] = df_agg.apply(calc_delta, axis=1)
-    df_delta = df_agg[df_agg["System"] != "LoRAMoE-0E"]
+    df_delta = df_agg[df_agg["System"] != "Base"]
     
     plt.figure(figsize=(12, 7))
-    sns.barplot(data=df_delta, x="System", y="AFQ_Delta", hue="Domain", order=[s for s in available_systems if s != "LoRAMoE-0E"], capsize=.05, edgecolor="black")
+    sns.barplot(data=df_delta, x="System", y="AFQ_Delta", hue="Domain", order=[s for s in available_systems if s != "Base"], capsize=.05, edgecolor="black")
     plt.axhline(0, color='black', linestyle='--', linewidth=1.5)
-    plt.title("Fig 2: AFQ Delta relative to Base (LoRAMoE-0E)", pad=15)
+    plt.title("Fig 2: AFQ Delta relative to Base", pad=15)
     plt.ylabel("AFQ Improvement (+/-)")
     plt.xlabel("")
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    # FIX: 45-degree rotation
     plt.xticks(rotation=45, ha='right', fontsize=12)
     plt.savefig(PLOTS_DIR / "fig2_delta_vs_base.pdf", bbox_inches='tight')
     plt.close()
@@ -194,7 +191,7 @@ def run_paper_plots(base_folder="Plots"):
     # Figure 3: Emergent Expert Count Sweep
     # -----------------------------
     print("Generating Figure 3: Emergent Expert Count Sweep...")
-    loramoe_sys = [s for s in available_systems if "LoRAMoE" in s and "E" in s and "rank" not in s and "0E" not in s]
+    loramoe_sys = [s for s in available_systems if "LoRAMoE" in s and "E" in s and "R64" not in s]
     if loramoe_sys:
         df_sweep = df_agg[df_agg["System"].isin(loramoe_sys)].copy()
         df_sweep["Expert_Count"] = df_sweep["System"].str.extract(r'(\d)E').astype(int)
@@ -213,12 +210,12 @@ def run_paper_plots(base_folder="Plots"):
     # Figure 4: Capacity vs Routing
     # -----------------------------
     print("Generating Figure 4: Capacity vs Routing...")
-    cap_sys = [s for s in ["LoRAMoE-1E 4x rank", "LoRAMoE-4E"] if s in available_systems]
+    cap_sys = [s for s in ["LoRAMoE-1E-R64", "LoRAMoE-4E"] if s in available_systems]
     if len(cap_sys) == 2:
         df_cap = df_agg[df_agg["System"].isin(cap_sys)]
         plt.figure(figsize=(8, 6))
         sns.barplot(data=df_cap, x="Domain", y="afq_score_0_to_100", hue="System", capsize=.05, edgecolor="black")
-        plt.title("Fig 4: Capacity (1E 4x rank) vs Routing (4E)", pad=15)
+        plt.title("Fig 4: Capacity (1E-R64) vs Routing (4E)", pad=15)
         plt.ylabel("AFQ Score (0-100)")
         plt.xlabel("Domain")
         plt.ylim(0, 100)
